@@ -1,518 +1,675 @@
 
 import io
 import re
-from datetime import datetime
+import hashlib
+from datetime import datetime, timezone, timedelta
+from urllib.parse import quote_plus, urlparse
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 try:
-    import pydeck as pdk
+    from bs4 import BeautifulSoup
 except Exception:
-    pdk = None
+    BeautifulSoup = None
 
-st.set_page_config(
-    page_title="M&A Renewable Deal Tracker",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="M&A Renewable Deal Tracker v2", page_icon="⚡", layout="wide")
 
-APP_TITLE = "M&A Renewable Deal Tracker – Spain & Spanish Companies Abroad"
-SAMPLE_FILE = "sample_deals.csv"
+APP_TITLE = "M&A Renewable Deal Tracker v2 – Auto-fed Open Sources"
+LOCAL_DB = "deals_database.csv"
+REQUEST_TIMEOUT = 15
 
 REQUIRED_COLUMNS = [
     "deal_id", "announcement_date", "closing_date", "year", "quarter", "deal_status",
-    "transaction_type", "asset_or_company_name", "target_type", "buyer", "buyer_country",
-    "buyer_type", "seller", "seller_country", "seller_type", "spanish_company_involved",
-    "spanish_company_role", "description", "technology", "location_country", "location_region",
-    "location_province", "location_city", "latitude", "longitude", "capacity_mw", "capacity_mwp",
-    "storage_mwh", "number_of_assets", "development_stage", "cod_date", "regulated_or_merchant",
-    "ppa_status", "ppa_counterparty", "remuneration_scheme", "grid_access_status",
-    "environmental_permit_status", "deal_value_eur_m", "enterprise_value_eur_m", "equity_value_eur_m",
-    "debt_assumed_eur_m", "price_per_mw_eur_m", "price_per_mwp_eur_m", "ownership_stake_acquired_pct",
-    "implied_100pct_value_eur_m", "ev_ebitda", "revenue_eur_m", "ebitda_eur_m", "net_debt_eur_m",
-    "advisors_buyer", "advisors_seller", "legal_advisor_buyer", "legal_advisor_seller",
-    "financial_advisor_buyer", "financial_advisor_seller", "source_1", "source_2", "source_3",
-    "source_quality_score", "notes", "last_updated",
+    "transaction_type", "asset_or_company_name", "target_type", "buyer", "buyer_country", "buyer_type",
+    "seller", "seller_country", "seller_type", "spanish_company_involved", "spanish_company_role",
+    "description", "technology", "location_country", "location_region", "location_province", "location_city",
+    "latitude", "longitude", "capacity_mw", "capacity_mwp", "storage_mwh", "number_of_assets",
+    "development_stage", "cod_date", "regulated_or_merchant", "ppa_status", "ppa_counterparty",
+    "remuneration_scheme", "grid_access_status", "environmental_permit_status", "deal_value_eur_m",
+    "enterprise_value_eur_m", "equity_value_eur_m", "debt_assumed_eur_m", "price_per_mw_eur_m",
+    "price_per_mwp_eur_m", "ownership_stake_acquired_pct", "implied_100pct_value_eur_m", "ev_ebitda",
+    "revenue_eur_m", "ebitda_eur_m", "net_debt_eur_m", "advisors_buyer", "advisors_seller",
+    "legal_advisor_buyer", "legal_advisor_seller", "financial_advisor_buyer", "financial_advisor_seller",
+    "source_1", "source_2", "source_3", "source_quality_score", "notes", "last_updated",
+    # v2 ingestion fields
+    "source_type", "source_domain", "source_url", "article_title", "article_date", "ingestion_date",
+    "extraction_method", "extraction_confidence_score", "validation_status", "duplicate_group_id",
+    "raw_text_excerpt"
 ]
 
 NUMERIC_COLUMNS = [
     "year", "latitude", "longitude", "capacity_mw", "capacity_mwp", "storage_mwh", "number_of_assets",
     "deal_value_eur_m", "enterprise_value_eur_m", "equity_value_eur_m", "debt_assumed_eur_m",
-    "price_per_mw_eur_m", "price_per_mwp_eur_m", "ownership_stake_acquired_pct",
-    "implied_100pct_value_eur_m", "ev_ebitda", "revenue_eur_m", "ebitda_eur_m", "net_debt_eur_m",
-    "source_quality_score",
+    "price_per_mw_eur_m", "price_per_mwp_eur_m", "ownership_stake_acquired_pct", "implied_100pct_value_eur_m",
+    "ev_ebitda", "revenue_eur_m", "ebitda_eur_m", "net_debt_eur_m", "source_quality_score",
+    "extraction_confidence_score"
 ]
 
-STRATEGIC_BUYER_TYPES = {"utility", "oil & gas", "developer", "IPP", "corporate"}
-FINANCIAL_BUYER_TYPES = {"infrastructure fund", "pension fund", "private equity", "sovereign fund", "family office"}
+KEYWORDS = [
+    'renewable acquisition Spain', 'solar portfolio acquisition Spain', 'wind portfolio sale Spain',
+    'renovables compra cartera España', 'M&A renovables España', 'biometano adquisición España',
+    'Iberdrola acquires renewable assets', 'Acciona Energía sale renewable assets', 'Repsol renewable portfolio sale',
+    'Naturgy renewable acquisition', 'EDPR sells renewable portfolio', 'Sonnedix Spain acquisition',
+    'Qualitas Energy renewable acquisition Spain', 'Masdar Spain renewable portfolio',
+]
+
+TRUSTED_DOMAINS = {
+    "pv-magazine.es": 4, "pv-magazine.com": 4, "renewablesnow.com": 4,
+    "elperiodicodelaenergia.com": 3, "energias-renovables.com": 3,
+    "cnmv.es": 5, "iberdrola.com": 5, "acciona-energia.com": 5, "repsol.com": 5,
+    "naturgy.com": 5, "edpr.com": 5, "solariaenergia.com": 5,
+}
+
+TECH_PATTERNS = {
+    "solar PV": r"solar|fotovoltaic|fotovoltaica|pv",
+    "wind onshore": r"wind|eólic|eolic|onshore",
+    "wind offshore": r"offshore",
+    "battery storage": r"battery|bess|storage|almacenamiento|bater",
+    "biomethane": r"biomethane|biometano",
+    "biogas": r"biogas|biogás",
+    "hydrogen": r"hydrogen|hidrógeno|hidrogeno",
+    "hydro": r"hydro|hidroeléctr",
+}
+
+BUYER_TYPES = {
+    "fund": "infrastructure fund", "capital": "private equity", "partners": "private equity", "pension": "pension fund",
+    "utility": "utility", "energy": "utility", "energía": "utility", "energia": "utility", "oil": "oil & gas",
+}
 
 
-def fmt_eur_m(x):
-    if pd.isna(x):
-        return "n.d."
-    return f"€{x:,.1f}m"
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fmt_num(x, suffix=""):
-    if pd.isna(x):
-        return "n.d."
-    return f"{x:,.1f}{suffix}"
+def safe_get(url, params=None, headers=None):
+    headers = headers or {"User-Agent": "Mozilla/5.0 renewable-ma-tracker/2.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()
+        return r
+    except Exception as e:
+        st.session_state.setdefault("source_errors", []).append(f"{url}: {e}")
+        return None
 
 
-def clean_string(value):
-    if pd.isna(value):
+def domain_from_url(url):
+    try:
+        d = urlparse(url).netloc.lower().replace("www.", "")
+        return d
+    except Exception:
         return ""
-    value = str(value).strip()
-    value = re.sub(r"\s+", " ", value)
-    return value
 
 
-def normalize_technology(value):
-    v = clean_string(value).lower()
-    mapping = {
-        "solar": "solar PV", "solar pv": "solar PV", "pv": "solar PV", "fotovoltaica": "solar PV",
-        "onshore wind": "wind onshore", "wind": "wind onshore", "eólica": "wind onshore", "eolica": "wind onshore",
-        "offshore wind": "wind offshore", "battery": "battery storage", "bess": "battery storage",
-        "storage": "battery storage", "biomethane": "biomethane", "biometano": "biomethane",
-        "biogas": "biogas", "hydrogen": "hydrogen", "hidrogeno": "hydrogen", "hydro": "hydro",
-        "hybrid": "hybrid", "híbrido": "hybrid", "hibrido": "hybrid",
+def stable_id(*parts):
+    raw = "|".join([str(p or "").strip().lower() for p in parts])
+    return "AUTO-" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12].upper()
+
+
+def clean_text(x):
+    if pd.isna(x):
+        return ""
+    return re.sub(r"\s+", " ", str(x)).strip()
+
+
+def infer_technology(text):
+    t = text.lower()
+    hits = [tech for tech, pat in TECH_PATTERNS.items() if re.search(pat, t)]
+    if len(hits) >= 2:
+        return "hybrid"
+    return hits[0] if hits else "other"
+
+
+def infer_country_region(text):
+    t = text.lower()
+    if any(k in t for k in ["spain", "españa", "península ibérica", "iberia", "spanish"]):
+        return "Spain"
+    if "portugal" in t or "portuguese" in t:
+        return "Portugal"
+    for country in ["Italy", "France", "Germany", "United Kingdom", "United States", "Mexico", "Brazil", "Chile", "Australia"]:
+        if country.lower() in t:
+            return country
+    return ""
+
+
+def infer_buyer_seller(text):
+    # Heurística simple; deja pending_review para validación manual.
+    patterns = [
+        r"(?P<buyer>[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,80})\s+(?:acquires|buys|purchases|takes over|adquiere|compra)\s+(?:a |an |the |una |un |el |la )?(?P<target>[A-ZÁÉÍÓÚÑ0-9][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,100})",
+        r"(?P<seller>[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,80})\s+(?:sells|vende)\s+(?:a |an |the |una |un |el |la )?(?P<target>[A-ZÁÉÍÓÚÑ0-9][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,100})\s+(?:to|a)\s+(?P<buyer>[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,80})",
+        r"(?P<buyer>[A-ZÁÉÍÓÚÑ][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,80})\s+(?:entra en|invests in|invierte en)\s+(?P<target>[A-ZÁÉÍÓÚÑ0-9][\wÁÉÍÓÚÜÑáéíóúüñ&\.\- ]{2,100})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return clean_text(m.groupdict().get("buyer", "")), clean_text(m.groupdict().get("seller", "")), clean_text(m.groupdict().get("target", ""))
+    return "", "", ""
+
+
+def extract_numbers(text):
+    t = text.replace(",", ".")
+    mw = np.nan
+    val = np.nan
+    stake = np.nan
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:GW|gigawatts?)", t, re.I)
+    if m:
+        mw = float(m.group(1)) * 1000
+    else:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:MW|MWp|megawatts?)", t, re.I)
+        if m:
+            mw = float(m.group(1))
+    m = re.search(r"(?:€|EUR|euros?)\s*(\d+(?:\.\d+)?)\s*(?:m|million|millones|mn|M)\b", t, re.I)
+    if not m:
+        m = re.search(r"(\d+(?:\.\d+)?)\s*(?:m|million|millones|mn|M)\s*(?:€|EUR|euros?)", t, re.I)
+    if m:
+        val = float(m.group(1))
+    m = re.search(r"(\d+(?:\.\d+)?)\s*%", t)
+    if m:
+        stake = float(m.group(1))
+    return mw, val, stake
+
+
+def classify_transaction(text):
+    t = text.lower()
+    if "joint venture" in t or " jv " in t:
+        return "JV"
+    if "minority" in t or "minoritaria" in t:
+        return "minority stake"
+    if "majority" in t or "mayoritaria" in t:
+        return "majority stake"
+    if "platform" in t or "plataforma" in t:
+        return "platform acquisition"
+    if "portfolio" in t or "cartera" in t:
+        return "portfolio sale"
+    if "pipeline" in t:
+        return "development pipeline"
+    if "merger" in t or "fusion" in t or "fusión" in t:
+        return "merger"
+    return "asset deal"
+
+
+def infer_buyer_type(buyer):
+    b = buyer.lower()
+    for k, v in BUYER_TYPES.items():
+        if k in b:
+            return v
+    return "other" if buyer else ""
+
+
+def article_to_deal(article, source_type):
+    title = clean_text(article.get("title"))
+    desc = clean_text(article.get("description") or article.get("seendate") or "")
+    url = clean_text(article.get("url"))
+    published = clean_text(article.get("publishedAt") or article.get("seendate") or article.get("datetime") or "")
+    text = f"{title}. {desc}"
+    buyer, seller, target = infer_buyer_seller(text)
+    mw, val, stake = extract_numbers(text)
+    domain = domain_from_url(url)
+    qscore = TRUSTED_DOMAINS.get(domain, 2)
+    confidence = 30
+    confidence += 20 if buyer or seller else 0
+    confidence += 20 if not pd.isna(mw) else 0
+    confidence += 10 if not pd.isna(val) else 0
+    confidence += 10 if domain in TRUSTED_DOMAINS else 0
+    confidence += 10 if any(w in text.lower() for w in ["acquires", "buys", "sells", "adquiere", "compra", "vende", "m&a", "merger", "acquisition"]) else 0
+    confidence = min(confidence, 95)
+
+    try:
+        adate = pd.to_datetime(published, errors="coerce", utc=True)
+        adate_str = adate.date().isoformat() if pd.notna(adate) else ""
+    except Exception:
+        adate_str = ""
+
+    fallback_target = title[:90] if title else "Auto-detected renewable M&A candidate"
+    country = infer_country_region(text)
+    spanish = "yes" if any(x in text.lower() for x in ["spain", "españa", "spanish", "iberdrola", "acciona", "repsol", "naturgy", "edpr", "solaria"]) else "unknown"
+
+    return {
+        "deal_id": stable_id(url, title),
+        "announcement_date": adate_str,
+        "closing_date": "",
+        "year": pd.to_datetime(adate_str, errors="coerce").year if adate_str else np.nan,
+        "quarter": f"Q{pd.to_datetime(adate_str, errors='coerce').quarter}" if adate_str else "",
+        "deal_status": "announced",
+        "transaction_type": classify_transaction(text),
+        "asset_or_company_name": target or fallback_target,
+        "target_type": "portfolio" if "portfolio" in text.lower() or "cartera" in text.lower() else "asset/company",
+        "buyer": buyer,
+        "buyer_country": "",
+        "buyer_type": infer_buyer_type(buyer),
+        "seller": seller,
+        "seller_country": "",
+        "seller_type": "",
+        "spanish_company_involved": spanish,
+        "spanish_company_role": "unknown",
+        "description": text[:500],
+        "technology": infer_technology(text),
+        "location_country": country,
+        "location_region": "",
+        "location_province": "",
+        "location_city": "",
+        "latitude": np.nan,
+        "longitude": np.nan,
+        "capacity_mw": mw,
+        "capacity_mwp": np.nan,
+        "storage_mwh": np.nan,
+        "number_of_assets": np.nan,
+        "development_stage": "unknown",
+        "cod_date": "",
+        "regulated_or_merchant": "unknown",
+        "ppa_status": "unknown",
+        "ppa_counterparty": "",
+        "remuneration_scheme": "",
+        "grid_access_status": "unknown",
+        "environmental_permit_status": "unknown",
+        "deal_value_eur_m": val,
+        "enterprise_value_eur_m": val,
+        "equity_value_eur_m": np.nan,
+        "debt_assumed_eur_m": np.nan,
+        "price_per_mw_eur_m": val / mw if pd.notna(val) and pd.notna(mw) and mw > 0 else np.nan,
+        "price_per_mwp_eur_m": np.nan,
+        "ownership_stake_acquired_pct": stake,
+        "implied_100pct_value_eur_m": val / (stake/100) if pd.notna(val) and pd.notna(stake) and stake > 0 else np.nan,
+        "ev_ebitda": np.nan,
+        "revenue_eur_m": np.nan,
+        "ebitda_eur_m": np.nan,
+        "net_debt_eur_m": np.nan,
+        "advisors_buyer": "",
+        "advisors_seller": "",
+        "legal_advisor_buyer": "",
+        "legal_advisor_seller": "",
+        "financial_advisor_buyer": "",
+        "financial_advisor_seller": "",
+        "source_1": url,
+        "source_2": "",
+        "source_3": "",
+        "source_quality_score": qscore,
+        "notes": "auto-detected from open online source; requires manual validation",
+        "last_updated": now_iso(),
+        "source_type": source_type,
+        "source_domain": domain,
+        "source_url": url,
+        "article_title": title,
+        "article_date": adate_str,
+        "ingestion_date": now_iso(),
+        "extraction_method": "regex_heuristic_v2",
+        "extraction_confidence_score": confidence,
+        "validation_status": "pending_review",
+        "duplicate_group_id": "",
+        "raw_text_excerpt": text[:1000]
     }
-    return mapping.get(v, clean_string(value) or "other")
 
 
-def normalize_yes_no(value):
-    v = clean_string(value).lower()
-    if v in {"yes", "y", "true", "1", "si", "sí"}:
-        return "yes"
-    if v in {"no", "n", "false", "0"}:
-        return "no"
-    return "unknown"
+def fetch_gdelt(max_records_per_query=25, days_back=90):
+    endpoint = "https://api.gdeltproject.org/api/v2/doc/doc"
+    rows = []
+    start = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime("%Y%m%d%H%M%S")
+    for q in KEYWORDS:
+        query = f'({q}) (acquires OR acquisition OR buys OR sells OR compra OR adquiere OR vende OR M&A OR merger) sourcelang:English OR sourcelang:Spanish'
+        params = {
+            "query": query,
+            "mode": "ArtList",
+            "format": "json",
+            "maxrecords": max_records_per_query,
+            "sort": "HybridRel",
+            "startdatetime": start,
+        }
+        r = safe_get(endpoint, params=params)
+        if not r:
+            continue
+        try:
+            data = r.json()
+            for a in data.get("articles", []):
+                rows.append(article_to_deal(a, "GDELT"))
+        except Exception as e:
+            st.session_state.setdefault("source_errors", []).append(f"GDELT parse error: {e}")
+    return rows
+
+
+def fetch_newsapi(api_key, max_records=50):
+    if not api_key:
+        return []
+    url = "https://newsapi.org/v2/everything"
+    q = '(renewable OR solar OR wind OR battery OR biomethane) AND (acquires OR acquisition OR sells OR buys OR merger OR M&A) AND (Spain OR Spanish OR Iberdrola OR Acciona OR Repsol OR Naturgy OR EDPR)'
+    params = {"q": q, "language": "en", "sortBy": "publishedAt", "pageSize": max_records, "apiKey": api_key}
+    r = safe_get(url, params=params)
+    if not r:
+        return []
+    try:
+        return [article_to_deal(a, "NewsAPI") for a in r.json().get("articles", [])]
+    except Exception as e:
+        st.session_state.setdefault("source_errors", []).append(f"NewsAPI parse error: {e}")
+        return []
+
+
+def fetch_gnews(api_key, max_records=50):
+    if not api_key:
+        return []
+    url = "https://gnews.io/api/v4/search"
+    q = '(renewable acquisition Spain) OR (solar portfolio Spain acquisition) OR (wind portfolio sale Spain)'
+    params = {"q": q, "lang": "en", "max": max_records, "apikey": api_key}
+    r = safe_get(url, params=params)
+    if not r:
+        return []
+    try:
+        articles = []
+        for a in r.json().get("articles", []):
+            articles.append({"title": a.get("title"), "description": a.get("description"), "url": a.get("url"), "publishedAt": a.get("publishedAt")})
+        return [article_to_deal(a, "GNews") for a in articles]
+    except Exception as e:
+        st.session_state.setdefault("source_errors", []).append(f"GNews parse error: {e}")
+        return []
+
+
+def fetch_pv_magazine_search(max_pages=2):
+    # Scraping ligero de páginas públicas de búsqueda. Si el sitio cambia, la app simplemente degradará a GDELT/NewsAPI.
+    rows = []
+    if BeautifulSoup is None:
+        return rows
+    queries = ["M&A renovables España", "adquiere cartera renovable", "vende cartera renovable", "compra parques solares"]
+    for q in queries:
+        url = f"https://www.pv-magazine.es/?s={quote_plus(q)}"
+        r = safe_get(url)
+        if not r:
+            continue
+        soup = BeautifulSoup(r.text, "lxml")
+        for item in soup.find_all(["article", "div"], limit=80):
+            a = item.find("a", href=True)
+            if not a:
+                continue
+            title = clean_text(a.get_text(" "))
+            href = a["href"]
+            if not title or "pv-magazine" not in href:
+                continue
+            desc = clean_text(item.get_text(" "))[:500]
+            rows.append(article_to_deal({"title": title, "description": desc, "url": href, "publishedAt": ""}, "pv_magazine_search"))
+    return rows
 
 
 def ensure_schema(df):
     df = df.copy()
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            df[col] = np.nan
-    df = df[REQUIRED_COLUMNS + [c for c in df.columns if c not in REQUIRED_COLUMNS]]
-    return df
+    for c in REQUIRED_COLUMNS:
+        if c not in df.columns:
+            df[c] = np.nan
+    return df[REQUIRED_COLUMNS + [c for c in df.columns if c not in REQUIRED_COLUMNS]]
 
 
 def convert_types(df):
-    df = df.copy()
-    for col in NUMERIC_COLUMNS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ["announcement_date", "closing_date", "cod_date", "last_updated"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+    df = ensure_schema(df)
+    for c in NUMERIC_COLUMNS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ["announcement_date", "closing_date", "cod_date", "last_updated", "article_date", "ingestion_date"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce")
     return df
 
 
-def add_calculated_fields(df):
-    df = ensure_schema(convert_types(df))
-    df = df.copy()
-
-    for col in ["buyer", "seller", "asset_or_company_name", "location_country", "location_region", "location_province"]:
-        df[col] = df[col].apply(clean_string)
-    df["technology"] = df["technology"].apply(normalize_technology)
-    df["spanish_company_involved"] = df["spanish_company_involved"].apply(normalize_yes_no)
-
+def enrich_calculated(df):
+    df = convert_types(df)
+    # Crear columnas calculadas incluso si no hay datos, para que la UI no falle.
+    for calc_col, default in {
+        "disclosed_value_flag": False,
+        "disclosed_capacity_flag": False,
+        "data_completion_pct": np.nan,
+        "suspected_duplicate_flag": False,
+        "deal_scope": "Global / unknown",
+    }.items():
+        if calc_col not in df.columns:
+            df[calc_col] = default
+    if df.empty:
+        return df
     missing_year = df["year"].isna() & df["announcement_date"].notna()
     df.loc[missing_year, "year"] = df.loc[missing_year, "announcement_date"].dt.year
     df["year"] = pd.to_numeric(df["year"], errors="coerce").astype("Int64")
-
-    missing_q = (df["quarter"].isna() | (df["quarter"].astype(str).str.lower().isin(["nan", "", "none"]))) & df["announcement_date"].notna()
+    missing_q = (df["quarter"].isna() | df["quarter"].astype(str).isin(["", "nan", "NaT"])) & df["announcement_date"].notna()
     df.loc[missing_q, "quarter"] = "Q" + df.loc[missing_q, "announcement_date"].dt.quarter.astype(str)
-
-    df["disclosed_value_flag"] = df["deal_value_eur_m"].notna() | df["enterprise_value_eur_m"].notna() | df["equity_value_eur_m"].notna()
-    df["disclosed_capacity_flag"] = df["capacity_mw"].notna() | df["capacity_mwp"].notna()
-
-    effective_value = df["deal_value_eur_m"].combine_first(df["enterprise_value_eur_m"]).combine_first(df["equity_value_eur_m"])
-    effective_mw = df["capacity_mw"].combine_first(df["capacity_mwp"])
-    df["calculated_price_per_mw"] = np.where((effective_value.notna()) & (effective_mw > 0), effective_value / effective_mw, np.nan)
-    df["price_per_mw_eur_m"] = df["price_per_mw_eur_m"].combine_first(df["calculated_price_per_mw"])
-
-    stake = pd.to_numeric(df["ownership_stake_acquired_pct"], errors="coerce")
-    df["implied_100pct_value"] = np.where((effective_value.notna()) & (stake > 0), effective_value / (stake / 100), np.nan)
-    df["implied_100pct_value_eur_m"] = df["implied_100pct_value_eur_m"].combine_first(df["implied_100pct_value"])
-
-    scope_conditions = [
-        df["location_country"].str.lower().eq("spain"),
-        df["spanish_company_involved"].eq("yes") & ~df["location_country"].str.lower().eq("spain"),
-        df["location_country"].str.lower().isin(["spain", "portugal"]),
-    ]
-    scope_values = ["Spain renewable asset/company", "Spanish company abroad", "Iberia"]
-    df["deal_scope"] = np.select(scope_conditions, scope_values, default="Global renewable platform")
-
-    core_cols = ["deal_id", "announcement_date", "deal_status", "transaction_type", "asset_or_company_name", "buyer", "seller", "description", "technology", "location_country", "capacity_mw", "deal_value_eur_m", "source_1"]
-    df["data_completion_pct"] = df[core_cols].notna().mean(axis=1) * 100
-
-    dup_subset = ["announcement_date", "asset_or_company_name", "buyer", "seller", "technology", "location_country"]
-    df["suspected_duplicate_flag"] = df.duplicated(subset=dup_subset, keep=False)
-    df["strategic_buyer_flag"] = df["buyer_type"].str.lower().isin({x.lower() for x in STRATEGIC_BUYER_TYPES})
-    df["financial_buyer_flag"] = df["buyer_type"].str.lower().isin({x.lower() for x in FINANCIAL_BUYER_TYPES})
-    df["operational_asset_flag"] = df["development_stage"].str.lower().eq("operational")
-    df["development_pipeline_flag"] = df["development_stage"].str.lower().isin(["development", "early stage", "ready-to-build", "under construction"])
-
+    ev = df["deal_value_eur_m"].combine_first(df["enterprise_value_eur_m"]).combine_first(df["equity_value_eur_m"])
+    mw = df["capacity_mw"].combine_first(df["capacity_mwp"])
+    df["disclosed_value_flag"] = ev.notna()
+    df["disclosed_capacity_flag"] = mw.notna()
+    calc = np.where((ev.notna()) & (mw > 0), ev / mw, np.nan)
+    df["price_per_mw_eur_m"] = df["price_per_mw_eur_m"].combine_first(pd.Series(calc, index=df.index))
+    stake = df["ownership_stake_acquired_pct"]
+    implied = np.where((ev.notna()) & (stake > 0), ev / (stake / 100), np.nan)
+    df["implied_100pct_value_eur_m"] = df["implied_100pct_value_eur_m"].combine_first(pd.Series(implied, index=df.index))
+    df["data_completion_pct"] = df[["deal_id", "announcement_date", "buyer", "seller", "asset_or_company_name", "technology", "location_country", "capacity_mw", "deal_value_eur_m", "source_1"]].notna().mean(axis=1) * 100
+    dup_key = df[["asset_or_company_name", "buyer", "seller", "source_domain"]].fillna("").agg("|".join, axis=1).str.lower()
+    df["suspected_duplicate_flag"] = dup_key.duplicated(keep=False)
+    loc_country = df["location_country"].fillna("").astype(str).str.lower()
+    spanish_flag = df["spanish_company_involved"].fillna("").astype(str).str.lower()
+    df["deal_scope"] = np.select(
+        [loc_country.eq("spain"), spanish_flag.eq("yes") & ~loc_country.eq("spain")],
+        ["Spain renewable asset/company", "Spanish company abroad"],
+        default="Global / unknown"
+    )
     return df
 
 
-@st.cache_data(show_spinner=False)
-def load_sample_data():
-    return pd.read_csv(SAMPLE_FILE)
+def read_local_db():
+    try:
+        return pd.read_csv(LOCAL_DB)
+    except Exception:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
 
-def load_uploaded_file(uploaded_file):
-    if uploaded_file is None:
-        return load_sample_data(), "sample_deals.csv"
-    name = uploaded_file.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(uploaded_file), uploaded_file.name
-    if name.endswith((".xlsx", ".xls")):
-        return pd.read_excel(uploaded_file, engine="openpyxl" if name.endswith(".xlsx") else None), uploaded_file.name
-    st.error("Formato no soportado. Sube un CSV o Excel.")
-    st.stop()
+def fetch_online_sources():
+    st.session_state["source_errors"] = []
+    newsapi_key = st.secrets.get("NEWSAPI_KEY", "") if hasattr(st, "secrets") else ""
+    gnews_key = st.secrets.get("GNEWS_API_KEY", "") if hasattr(st, "secrets") else ""
+    rows = []
+    rows.extend(fetch_gdelt())
+    rows.extend(fetch_pv_magazine_search())
+    rows.extend(fetch_newsapi(newsapi_key))
+    rows.extend(fetch_gnews(gnews_key))
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+    df = ensure_schema(df)
+    df = df.drop_duplicates(subset=["deal_id"], keep="first")
+    # Filtrar ruido: mantener artículos con señales transaccionales o fuentes fiables.
+    signal = df["raw_text_excerpt"].str.lower().str.contains("acquire|acquisition|buy|sell|merger|m&a|adquiere|compra|vende|fusión|fusion|cartera|portfolio", na=False)
+    df = df[signal | (df["source_quality_score"] >= 4)]
+    return df
+
+
+def merge_sources(local_df, online_df):
+    combined = pd.concat([local_df, online_df], ignore_index=True)
+    if combined.empty:
+        return ensure_schema(combined)
+    combined = ensure_schema(combined)
+    # Preferir registros ya validados frente a auto-detectados
+    combined["_rank"] = combined["validation_status"].map({"validated": 0, "pending_review": 1, "auto_detected": 2}).fillna(3)
+    combined = combined.sort_values(["deal_id", "_rank"]).drop_duplicates("deal_id", keep="first").drop(columns="_rank")
+    return enrich_calculated(combined)
 
 
 def to_excel_bytes(df, sheet_name="Deals"):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
-    return output.getvalue()
+    return out.getvalue()
 
 
-def build_markdown_summary(df):
-    effective_value = df["deal_value_eur_m"].sum(min_count=1)
-    effective_mw = df["capacity_mw"].sum(min_count=1)
-    weighted = effective_value / effective_mw if pd.notna(effective_value) and pd.notna(effective_mw) and effective_mw > 0 else np.nan
-    lines = [
-        "# Executive Summary - Selected Renewable M&A Deals",
-        f"- Number of selected deals: {len(df)}",
-        f"- Total disclosed deal value: {fmt_eur_m(effective_value)}",
-        f"- Total capacity: {fmt_num(effective_mw, ' MW')}",
-        f"- Weighted average price: {fmt_eur_m(weighted)} / MW",
-        "",
-        "## Selected deals",
-    ]
-    for _, r in df.iterrows():
-        lines.append(f"- **{r.get('asset_or_company_name','')}**: {r.get('buyer','')} acquiring from {r.get('seller','')} ({r.get('technology','')}, {r.get('location_country','')}, {fmt_num(r.get('capacity_mw'), ' MW')}, {fmt_eur_m(r.get('deal_value_eur_m'))}).")
-    return "\n".join(lines)
+def fmt_eur(x):
+    return "n.d." if pd.isna(x) else f"€{x:,.1f}m"
+
+
+def fmt_num(x, suf=""):
+    return "n.d." if pd.isna(x) else f"{x:,.1f}{suf}"
 
 
 def sidebar_filters(df):
     st.sidebar.header("Filtros")
-    filtered = df.copy()
-
-    years = sorted([int(x) for x in filtered["year"].dropna().unique()])
-    if years:
-        min_y, max_y = min(years), max(years)
-        year_range = st.sidebar.slider("Año", min_y, max_y, (min_y, max_y))
-        filtered = filtered[(filtered["year"].isna()) | ((filtered["year"] >= year_range[0]) & (filtered["year"] <= year_range[1]))]
-
-    def multi_filter(col, label):
-        nonlocal filtered
-        vals = sorted([x for x in filtered[col].dropna().unique() if str(x).strip()])
-        selected = st.sidebar.multiselect(label, vals)
-        if selected:
-            filtered = filtered[filtered[col].isin(selected)]
-
-    for col, label in [
-        ("deal_status", "Estado"), ("technology", "Tecnología"), ("location_country", "País del activo"),
-        ("location_region", "Región"), ("location_province", "Provincia"), ("buyer", "Comprador"),
-        ("seller", "Vendedor"), ("buyer_type", "Tipo comprador"), ("seller_type", "Tipo vendedor"),
-        ("transaction_type", "Tipo transacción"), ("development_stage", "Fase del activo"),
-        ("regulated_or_merchant", "Regulado/PPA/Merchant"),
-    ]:
-        multi_filter(col, label)
-
-    if st.sidebar.checkbox("Solo activos/compañías en España"):
-        filtered = filtered[filtered["deal_scope"].eq("Spain renewable asset/company")]
-    if st.sidebar.checkbox("Solo internacionales con compañía española"):
-        filtered = filtered[filtered["deal_scope"].eq("Spanish company abroad")]
-
-    if filtered["capacity_mw"].notna().any():
-        max_mw = float(np.nanmax(filtered["capacity_mw"].fillna(0)))
-        mw_range = st.sidebar.slider("Rango MW", 0.0, max(max_mw, 1.0), (0.0, max(max_mw, 1.0)))
-        filtered = filtered[(filtered["capacity_mw"].isna()) | (filtered["capacity_mw"].between(mw_range[0], mw_range[1]))]
-
-    if filtered["deal_value_eur_m"].notna().any():
-        max_val = float(np.nanmax(filtered["deal_value_eur_m"].fillna(0)))
-        val_range = st.sidebar.slider("Rango importe EURm", 0.0, max(max_val, 1.0), (0.0, max(max_val, 1.0)))
-        filtered = filtered[(filtered["deal_value_eur_m"].isna()) | (filtered["deal_value_eur_m"].between(val_range[0], val_range[1]))]
-
-    value_filter = st.sidebar.radio("Importe divulgado", ["Todos", "Solo divulgado", "Solo no divulgado"], horizontal=False)
-    if value_filter == "Solo divulgado":
-        filtered = filtered[filtered["disclosed_value_flag"]]
-    elif value_filter == "Solo no divulgado":
-        filtered = filtered[~filtered["disclosed_value_flag"]]
-
-    min_quality = st.sidebar.slider("Calidad mínima fuente", 1, 5, 1)
-    filtered = filtered[(filtered["source_quality_score"].isna()) | (filtered["source_quality_score"] >= min_quality)]
-    return filtered
+    f = df.copy()
+    min_conf = st.sidebar.slider("Confianza mínima extracción", 0, 100, 0)
+    f = f[(f["extraction_confidence_score"].isna()) | (f["extraction_confidence_score"] >= min_conf)]
+    statuses = sorted([x for x in f["validation_status"].dropna().astype(str).unique() if x])
+    sel = st.sidebar.multiselect("Validation status", statuses, default=statuses)
+    if sel:
+        f = f[f["validation_status"].astype(str).isin(sel)]
+    for col, label in [("technology", "Tecnología"), ("location_country", "País"), ("source_domain", "Fuente"), ("buyer", "Comprador"), ("seller", "Vendedor"), ("transaction_type", "Tipo transacción")]:
+        vals = sorted([x for x in f[col].dropna().astype(str).unique() if x])
+        picked = st.sidebar.multiselect(label, vals)
+        if picked:
+            f = f[f[col].astype(str).isin(picked)]
+    only_spain = st.sidebar.checkbox("Solo España / compañías españolas", value=True)
+    if only_spain:
+        f = f[(f["location_country"].fillna("").astype(str).str.lower().eq("spain")) | (f["spanish_company_involved"].fillna("").astype(str).str.lower().eq("yes"))]
+    disclosed = st.sidebar.radio("Importe", ["Todos", "Solo divulgado", "Solo no divulgado"], horizontal=True)
+    if disclosed == "Solo divulgado":
+        f = f[f["disclosed_value_flag"]]
+    elif disclosed == "Solo no divulgado":
+        f = f[~f["disclosed_value_flag"]]
+    return f
 
 
-def show_kpis(df):
-    value = df["deal_value_eur_m"].sum(min_count=1)
+def kpis(df):
+    val = df["deal_value_eur_m"].sum(min_count=1)
     mw = df["capacity_mw"].sum(min_count=1)
-    avg_price = value / mw if pd.notna(value) and pd.notna(mw) and mw > 0 else np.nan
-    closed = df["deal_status"].str.lower().eq("closed").sum()
-    pending = df["deal_status"].str.lower().isin(["announced", "pending"]).sum()
-    top_buyer = df["buyer"].replace("", np.nan).dropna().mode().iat[0] if not df["buyer"].replace("", np.nan).dropna().empty else "n.d."
-    top_seller = df["seller"].replace("", np.nan).dropna().mode().iat[0] if not df["seller"].replace("", np.nan).dropna().empty else "n.d."
-    top_tech = df.groupby("technology")["deal_value_eur_m"].sum().sort_values(ascending=False).index[0] if df["deal_value_eur_m"].notna().any() else "n.d."
-    top_year = df.groupby("year")["deal_value_eur_m"].sum().sort_values(ascending=False).index[0] if df["deal_value_eur_m"].notna().any() else "n.d."
-    spanish_pct = (df["spanish_company_involved"].eq("yes").mean() * 100) if len(df) else 0
-    price_pct = (df["disclosed_value_flag"].mean() * 100) if len(df) else 0
-
-    rows = [
-        [("Deals", f"{len(df):,}"), ("Valor anunciado", fmt_eur_m(value)), ("Capacidad", fmt_num(mw, " MW")), ("Valor medio/MW", fmt_eur_m(avg_price))],
-        [("Cerradas", f"{closed:,}"), ("Announced/Pending", f"{pending:,}"), ("Top comprador", top_buyer), ("Top vendedor", top_seller)],
-        [("Top tecnología", top_tech), ("Año top volumen", str(top_year)), ("% compañía española", f"{spanish_pct:.1f}%"), ("% precio divulgado", f"{price_pct:.1f}%")],
-    ]
-    for row in rows:
-        cols = st.columns(4)
-        for c, (label, val) in zip(cols, row):
-            c.metric(label, val)
+    wavg = val / mw if pd.notna(val) and pd.notna(mw) and mw > 0 else np.nan
+    c = st.columns(6)
+    c[0].metric("Deals", f"{len(df):,}")
+    c[1].metric("Valor divulgado", fmt_eur(val))
+    c[2].metric("MW", fmt_num(mw, " MW"))
+    c[3].metric("€/MW ponderado", fmt_eur(wavg))
+    c[4].metric("Pending review", int((df["validation_status"] == "pending_review").sum()))
+    c[5].metric("Fuentes", df["source_domain"].nunique())
 
 
-def charts_basic(df):
+def screener(df):
+    cols = ["deal_id", "validation_status", "extraction_confidence_score", "announcement_date", "asset_or_company_name", "buyer", "seller", "technology", "location_country", "capacity_mw", "deal_value_eur_m", "price_per_mw_eur_m", "ownership_stake_acquired_pct", "source_domain", "article_title", "source_url"]
+    view = df[cols].copy()
+    if "selected_ids" not in st.session_state:
+        st.session_state.selected_ids = []
+    view.insert(0, "select", view["deal_id"].astype(str).isin(st.session_state.selected_ids))
+    edited = st.data_editor(view, use_container_width=True, hide_index=True, height=540, disabled=[c for c in view.columns if c != "select"], column_config={"source_url": st.column_config.LinkColumn("source_url")})
+    st.session_state.selected_ids = edited.loc[edited["select"], "deal_id"].astype(str).tolist()
+    st.caption(f"Seleccionadas: {len(st.session_state.selected_ids)}")
+
+
+def charts(df):
     c1, c2 = st.columns(2)
     with c1:
-        annual = df.groupby("year", dropna=False).agg(deals=("deal_id", "count"), value=("deal_value_eur_m", "sum"), mw=("capacity_mw", "sum")).reset_index()
-        st.plotly_chart(px.bar(annual, x="year", y="deals", title="Evolución anual del número de deals"), use_container_width=True)
-        st.plotly_chart(px.bar(annual, x="year", y="mw", title="Capacidad MW transaccionada por año"), use_container_width=True)
+        if df["year"].notna().any():
+            annual = df.groupby("year").agg(deals=("deal_id", "count"), value=("deal_value_eur_m", "sum"), mw=("capacity_mw", "sum")).reset_index()
+            st.plotly_chart(px.bar(annual, x="year", y="deals", title="Deals por año"), use_container_width=True)
+            st.plotly_chart(px.bar(annual, x="year", y="value", title="Valor divulgado por año EURm"), use_container_width=True)
+        tech = df.groupby("technology").size().reset_index(name="deals")
+        st.plotly_chart(px.bar(tech, x="technology", y="deals", title="Deals por tecnología"), use_container_width=True)
     with c2:
-        st.plotly_chart(px.bar(annual, x="year", y="value", title="Volumen transaccionado anual (EURm)"), use_container_width=True)
-        tech = df.groupby("technology").agg(deals=("deal_id", "count"), value=("deal_value_eur_m", "sum")).reset_index()
-        st.plotly_chart(px.pie(tech, names="technology", values="deals", title="Deals por tecnología"), use_container_width=True)
-
-
-def show_screener(df):
-    display_cols = ["deal_id", "announcement_date", "asset_or_company_name", "buyer", "seller", "technology", "location_country", "location_region", "capacity_mw", "deal_value_eur_m", "price_per_mw_eur_m", "ownership_stake_acquired_pct", "deal_status", "description", "source_1"]
-    work = df[display_cols].copy()
-    if "selected_deal_ids" not in st.session_state:
-        st.session_state.selected_deal_ids = []
-    work.insert(0, "select", work["deal_id"].isin(st.session_state.selected_deal_ids))
-    edited = st.data_editor(work, hide_index=True, use_container_width=True, height=520, disabled=[c for c in work.columns if c != "select"])
-    selected = edited.loc[edited["select"], "deal_id"].tolist()
-    st.session_state.selected_deal_ids = selected
-    st.caption(f"Operaciones seleccionadas: {len(selected)}")
-    return selected
-
-
-def show_detail(df):
-    if df.empty:
-        st.info("No hay operaciones en el filtro actual.")
-        return
-    selected_default = st.session_state.get("selected_deal_ids", [])
-    options = df["deal_id"].astype(str).tolist()
-    idx = options.index(str(selected_default[0])) if selected_default and str(selected_default[0]) in options else 0
-    deal = st.selectbox("Selecciona operación", options, index=idx)
-    r = df[df["deal_id"].astype(str).eq(str(deal))].iloc[0]
-    st.subheader(r["asset_or_company_name"])
-    st.write(r["description"])
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Comprador", r["buyer"] or "n.d.")
-    c2.metric("Vendedor", r["seller"] or "n.d.")
-    c3.metric("Capacidad", fmt_num(r["capacity_mw"], " MW"))
-    c4.metric("Importe", fmt_eur_m(r["deal_value_eur_m"]))
-    st.markdown("#### Ficha del deal")
-    detail = {
-        "Estructura": r["transaction_type"], "Estado": r["deal_status"], "Stake adquirido": fmt_num(r["ownership_stake_acquired_pct"], "%"),
-        "Tecnología": r["technology"], "Localización": f"{r['location_city']}, {r['location_province']}, {r['location_region']}, {r['location_country']}",
-        "Fase": r["development_stage"], "COD": r["cod_date"], "PPA/Merchant/Regulado": r["regulated_or_merchant"],
-        "Grid access": r["grid_access_status"], "Environmental permit": r["environmental_permit_status"],
-        "€/MW": fmt_eur_m(r["price_per_mw_eur_m"]), "Valor implícito 100%": fmt_eur_m(r["implied_100pct_value_eur_m"]),
-        "Advisor comprador": r["advisors_buyer"], "Advisor vendedor": r["advisors_seller"],
-        "Fuentes": " | ".join([clean_string(r.get(c, "")) for c in ["source_1", "source_2", "source_3"] if clean_string(r.get(c, ""))]),
-        "Notas": r["notes"],
-    }
-    st.json(detail, expanded=False)
-
-
-def comparable_transactions(df):
-    selected = st.session_state.get("selected_deal_ids", [])
-    comp = df[df["deal_id"].astype(str).isin([str(x) for x in selected])].copy()
-    if comp.empty:
-        st.info("Selecciona operaciones en la pestaña Deal Screener para compararlas.")
-        return comp
-    cols = ["asset_or_company_name", "deal_value_eur_m", "capacity_mw", "price_per_mw_eur_m", "technology", "location_country", "development_stage", "ownership_stake_acquired_pct", "buyer_type", "seller_type", "year", "deal_status", "regulated_or_merchant", "notes"]
-    st.dataframe(comp[cols], use_container_width=True, hide_index=True)
-    val = comp["deal_value_eur_m"].sum(min_count=1)
-    mw = comp["capacity_mw"].sum(min_count=1)
-    simple = comp["price_per_mw_eur_m"].mean()
-    weighted = val / mw if pd.notna(val) and pd.notna(mw) and mw > 0 else np.nan
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Deals", len(comp)); c2.metric("Valor total", fmt_eur_m(val)); c3.metric("MW totales", fmt_num(mw, " MW")); c4.metric("€/MW simple", fmt_eur_m(simple)); c5.metric("€/MW ponderado", fmt_eur_m(weighted))
-    c1, c2, c3 = st.columns(3)
-    c1.plotly_chart(px.pie(comp, names="technology", title="Distribución por tecnología"), use_container_width=True)
-    c2.plotly_chart(px.pie(comp, names="development_stage", title="Distribución por fase"), use_container_width=True)
-    c3.plotly_chart(px.pie(comp, names="location_country", title="Distribución por país"), use_container_width=True)
-    return comp
-
-
-def market_analytics(df):
-    c1, c2 = st.columns(2)
-    with c1:
-        tech_value = df.groupby("technology")["deal_value_eur_m"].sum().sort_values(ascending=False).reset_index()
-        st.plotly_chart(px.bar(tech_value, x="technology", y="deal_value_eur_m", title="Deal value por tecnología"), use_container_width=True)
-        top_buyers = df["buyer"].value_counts().head(10).reset_index(); top_buyers.columns = ["buyer", "deals"]
-        st.plotly_chart(px.bar(top_buyers, x="deals", y="buyer", orientation="h", title="Top 10 compradores"), use_container_width=True)
-        if df["price_per_mw_eur_m"].notna().any():
-            st.plotly_chart(px.box(df, x="technology", y="price_per_mw_eur_m", color="development_stage", title="Boxplot €/MW por tecnología y fase"), use_container_width=True)
-    with c2:
-        top_sellers = df["seller"].value_counts().head(10).reset_index(); top_sellers.columns = ["seller", "deals"]
-        st.plotly_chart(px.bar(top_sellers, x="deals", y="seller", orientation="h", title="Top 10 vendedores"), use_container_width=True)
-        top_deals = df.sort_values("deal_value_eur_m", ascending=False).head(10)
-        st.plotly_chart(px.bar(top_deals, x="deal_value_eur_m", y="asset_or_company_name", orientation="h", title="Top 10 deals por importe"), use_container_width=True)
+        sources = df.groupby("source_domain").size().reset_index(name="articles").sort_values("articles", ascending=False).head(15)
+        st.plotly_chart(px.bar(sources, x="articles", y="source_domain", orientation="h", title="Fuentes más frecuentes"), use_container_width=True)
         if df["capacity_mw"].notna().any() and df["deal_value_eur_m"].notna().any():
             st.plotly_chart(px.scatter(df, x="capacity_mw", y="deal_value_eur_m", color="technology", hover_name="asset_or_company_name", title="MW vs Deal Value"), use_container_width=True)
-    heat = df.pivot_table(index="technology", columns="year", values="deal_id", aggfunc="count", fill_value=0)
-    if not heat.empty:
-        st.plotly_chart(px.imshow(heat, text_auto=True, title="Heatmap año vs tecnología"), use_container_width=True)
-    scope = df["deal_scope"].value_counts().reset_index(); scope.columns = ["scope", "deals"]
-    st.plotly_chart(px.bar(scope, x="scope", y="deals", title="España vs internacionales con compañía española"), use_container_width=True)
+        val = df[df["price_per_mw_eur_m"].notna()]
+        if not val.empty:
+            st.plotly_chart(px.box(val, x="technology", y="price_per_mw_eur_m", title="Benchmark €/MW"), use_container_width=True)
 
 
-def valuation_benchmarking(df):
-    st.subheader("Valuation Benchmarking")
-    valid = df[df["price_per_mw_eur_m"].notna() & df["disclosed_value_flag"] & df["disclosed_capacity_flag"]].copy()
-    if valid.empty:
-        st.info("No hay suficientes operaciones con precio y capacidad divulgados.")
+def deal_detail(df):
+    if df.empty:
+        st.info("No hay deals con los filtros actuales.")
         return
-    q1, q3 = valid["price_per_mw_eur_m"].quantile([0.25, 0.75])
-    iqr = q3 - q1
-    valid = valid[(valid["price_per_mw_eur_m"] >= q1 - 1.5 * iqr) & (valid["price_per_mw_eur_m"] <= q3 + 1.5 * iqr)]
-    group_cols = st.multiselect("Agrupar por", ["technology", "development_stage", "location_country"], default=["technology", "development_stage"])
-    if not group_cols:
-        group_cols = ["technology"]
-    bench = valid.groupby(group_cols)["price_per_mw_eur_m"].agg(
-        deals="count", min="min", p25=lambda x: x.quantile(0.25), median="median", p75=lambda x: x.quantile(0.75), max="max"
-    ).reset_index()
-    st.dataframe(bench, use_container_width=True, hide_index=True)
-    st.plotly_chart(px.bar(bench, x=group_cols[0], y="median", color=group_cols[1] if len(group_cols) > 1 else None, title="Mediana €/MW por benchmark"), use_container_width=True)
-
-
-def strategic_insights(df):
-    st.subheader("Strategic Insights")
-    c1, c2 = st.columns(2)
-    active_buyers = df["buyer"].value_counts().head(10).reset_index(); active_buyers.columns = ["buyer", "deals"]
-    recurring_sellers = df["seller"].value_counts().head(10).reset_index(); recurring_sellers.columns = ["seller", "deals"]
-    c1.dataframe(active_buyers, use_container_width=True, hide_index=True)
-    c2.dataframe(recurring_sellers, use_container_width=True, hide_index=True)
-
-    tech_liq = df.groupby("technology").agg(deals=("deal_id", "count"), value=("deal_value_eur_m", "sum"), mw=("capacity_mw", "sum")).sort_values("deals", ascending=False).reset_index()
-    regions = df.groupby(["location_country", "location_region"]).agg(deals=("deal_id", "count"), value=("deal_value_eur_m", "sum")).sort_values("deals", ascending=False).reset_index().head(15)
-    c1, c2 = st.columns(2)
-    c1.plotly_chart(px.bar(tech_liq, x="technology", y="deals", title="Tecnologías con mayor liquidez"), use_container_width=True)
-    c2.plotly_chart(px.bar(regions, x="deals", y="location_region", color="location_country", orientation="h", title="Regiones con más operaciones"), use_container_width=True)
-
-    distressed = df[df["transaction_type"].str.lower().str.contains("distressed", na=False) | df["notes"].str.lower().str.contains("distressed|refinancing|restructur", na=False)]
-    st.markdown("##### Activos distressed potenciales")
-    st.dataframe(distressed[["deal_id", "asset_or_company_name", "buyer", "seller", "technology", "deal_value_eur_m", "notes"]], use_container_width=True, hide_index=True)
-
-    trend = df[df["price_per_mw_eur_m"].notna()].groupby(["year", "technology"])["price_per_mw_eur_m"].median().reset_index()
-    if not trend.empty:
-        st.plotly_chart(px.line(trend, x="year", y="price_per_mw_eur_m", color="technology", markers=True, title="Cambio de tendencia en precios €/MW"), use_container_width=True)
-
-
-def data_quality(df):
-    st.subheader("Data Quality")
-    missing_value = df[df["deal_value_eur_m"].isna()]
-    missing_mw = df[df["capacity_mw"].isna()]
-    missing_source = df[df["source_1"].isna() | df["source_1"].astype(str).str.strip().eq("")]
-    ambiguous_status = df[~df["deal_status"].str.lower().isin(["announced", "closed", "pending", "cancelled", "rumoured"])]
-    price = df["price_per_mw_eur_m"]
-    if price.notna().sum() > 3:
-        q1, q3 = price.quantile([0.25, 0.75]); iqr = q3 - q1
-        anomalies = df[(price < q1 - 1.5 * iqr) | (price > q3 + 1.5 * iqr)]
+    options = df["deal_id"].astype(str).tolist()
+    default = 0
+    if st.session_state.get("selected_ids"):
+        sid = st.session_state.selected_ids[0]
+        if sid in options:
+            default = options.index(sid)
+    deal_id = st.selectbox("Deal", options, index=default)
+    r = df[df["deal_id"].astype(str) == deal_id].iloc[0]
+    st.subheader(r["asset_or_company_name"])
+    st.write(r["description"])
+    c = st.columns(5)
+    c[0].metric("Comprador", clean_text(r["buyer"]) or "n.d.")
+    c[1].metric("Vendedor", clean_text(r["seller"]) or "n.d.")
+    c[2].metric("MW", fmt_num(r["capacity_mw"], " MW"))
+    c[3].metric("Importe", fmt_eur(r["deal_value_eur_m"]))
+    c[4].metric("Confianza", fmt_num(r["extraction_confidence_score"], "%"))
+    source_link = clean_text(r["source_url"]) or clean_text(r["source_1"])
+    if source_link:
+        st.link_button("Abrir fuente", source_link)
     else:
-        anomalies = pd.DataFrame(columns=df.columns)
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Sin importe", len(missing_value)); c2.metric("Sin MW", len(missing_mw)); c3.metric("Sin fuente", len(missing_source)); c4.metric("€/MW anómalo", len(anomalies)); c5.metric("Duplicados", int(df["suspected_duplicate_flag"].sum())); c6.metric("Status ambiguo", len(ambiguous_status))
-    completion = (df.notna().mean() * 100).sort_values().reset_index(); completion.columns = ["field", "completion_pct"]
-    st.plotly_chart(px.bar(completion.head(30), x="completion_pct", y="field", orientation="h", title="Campos menos completos (%)"), use_container_width=True)
-    st.dataframe(df[["deal_id", "asset_or_company_name", "data_completion_pct", "source_quality_score", "suspected_duplicate_flag", "disclosed_value_flag", "disclosed_capacity_flag"]], use_container_width=True, hide_index=True)
+        st.caption("Fuente no disponible")
+    st.json({k: str(r[k]) for k in ["validation_status", "transaction_type", "technology", "location_country", "ownership_stake_acquired_pct", "price_per_mw_eur_m", "source_domain", "article_title", "raw_text_excerpt", "notes"]}, expanded=False)
 
 
-def map_tab(df):
-    geo = df[df["latitude"].notna() & df["longitude"].notna()].copy()
-    if geo.empty:
-        st.info("No hay coordenadas disponibles para mostrar mapa.")
-        return
-    if pdk is not None:
-        layer = pdk.Layer(
-            "ScatterplotLayer", data=geo, get_position="[longitude, latitude]", get_radius=5000,
-            get_fill_color=[30, 144, 255, 160], pickable=True,
-        )
-        view = pdk.ViewState(latitude=float(geo["latitude"].mean()), longitude=float(geo["longitude"].mean()), zoom=4)
-        st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view, tooltip={"text": "{asset_or_company_name}\n{technology}\n{capacity_mw} MW"}))
+def validation_workspace(df):
+    st.subheader("Pending Validation")
+    pending = df[df["validation_status"].astype(str).isin(["pending_review", "auto_detected", ""])]
+    st.info("La extracción automática es heurística. Usa esta pestaña para revisar candidatos, exportarlos y mantener solo los deals válidos en tu base maestra.")
+    cols = ["deal_id", "extraction_confidence_score", "asset_or_company_name", "buyer", "seller", "capacity_mw", "deal_value_eur_m", "technology", "location_country", "source_domain", "source_url", "raw_text_excerpt"]
+    st.dataframe(pending[cols], use_container_width=True, hide_index=True, column_config={"source_url": st.column_config.LinkColumn("source_url")})
+
+
+def export_tab(full_df, filtered_df):
+    st.download_button("Descargar base completa CSV", full_df.to_csv(index=False).encode("utf-8"), "deals_database_auto.csv", "text/csv")
+    st.download_button("Descargar base filtrada Excel", to_excel_bytes(filtered_df), "filtered_auto_deals.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    selected = filtered_df[filtered_df["deal_id"].astype(str).isin(st.session_state.get("selected_ids", []))]
+    st.download_button("Descargar seleccionadas Excel", to_excel_bytes(selected, "Selected"), "selected_deals.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.markdown("### Errores / avisos de fuentes")
+    errs = st.session_state.get("source_errors", [])
+    if errs:
+        st.write(errs[:30])
     else:
-        st.map(geo.rename(columns={"latitude": "lat", "longitude": "lon"})[["lat", "lon"]])
+        st.success("Sin errores de fuente en la última ingesta.")
 
 
 def main():
     st.title(APP_TITLE)
-    st.caption("Herramienta financiera para screening, comparables, valoración y calidad de datos de M&A renovable. Los datos de ejemplo son ficticios.")
+    st.caption("Autoalimentación con fuentes abiertas: GDELT sin API key, scraping ligero de pv magazine España y APIs opcionales NewsAPI/GNews si configuras secrets.")
 
-    st.sidebar.header("Carga de datos")
-    uploaded = st.sidebar.file_uploader(
-        "Subir CSV/Excel",
-        type=["csv", "xlsx", "xls"],
-        help="Si no subes archivo, se usa sample_deals.csv con datos ficticios.",
-    )
-    raw, source_name = load_uploaded_file(uploaded)
-    df = add_calculated_fields(raw)
-    filtered = sidebar_filters(df)
+    refresh = st.sidebar.button("🔄 Refrescar fuentes online ahora")
+    if "online_df" not in st.session_state or refresh:
+        with st.spinner("Consultando fuentes online y extrayendo candidatos de M&A renovable..."):
+            st.session_state.online_df = fetch_online_sources()
+            st.session_state.last_refresh = now_iso()
 
-    if source_name == SAMPLE_FILE or df["notes"].astype(str).str.contains("sample data", case=False, na=False).any():
-        st.warning("Estás usando datos ficticios de ejemplo marcados como sample data. Sustituye el CSV por una base real verificada para análisis profesional.")
+    local_df = read_local_db()
+    full_df = merge_sources(local_df, st.session_state.online_df)
+    filtered = sidebar_filters(full_df)
 
-    missing_cols = [c for c in REQUIRED_COLUMNS if c not in raw.columns]
-    if missing_cols:
-        st.info(f"Se han creado columnas vacías para campos ausentes: {', '.join(missing_cols[:12])}{'...' if len(missing_cols) > 12 else ''}")
+    st.info(f"Última actualización online de esta sesión: {st.session_state.get('last_refresh', 'n.d.')} | Deals online detectados: {len(st.session_state.online_df):,} | Base total combinada: {len(full_df):,}")
 
-    tabs = st.tabs([
-        "Executive Dashboard", "Deal Screener", "Deal Detail", "Comparable Transactions", "Market Analytics",
-        "Map", "Valuation Benchmarking", "Strategic Insights", "Data Quality", "Upload & Export",
-    ])
-
+    tabs = st.tabs(["Executive Dashboard", "Live Deal Feed", "Deal Detail", "Comparable Transactions", "Market Analytics", "Valuation Benchmarking", "Strategic Insights", "Pending Validation", "Export"])
     with tabs[0]:
-        show_kpis(filtered)
-        charts_basic(filtered)
+        kpis(filtered)
+        charts(filtered)
     with tabs[1]:
-        show_screener(filtered)
+        screener(filtered)
     with tabs[2]:
-        show_detail(filtered)
+        deal_detail(filtered)
     with tabs[3]:
-        comp = comparable_transactions(filtered)
+        selected = filtered[filtered["deal_id"].astype(str).isin(st.session_state.get("selected_ids", []))]
+        st.dataframe(selected, use_container_width=True, hide_index=True)
+        if not selected.empty:
+            kpis(selected)
     with tabs[4]:
-        market_analytics(filtered)
+        charts(filtered)
     with tabs[5]:
-        map_tab(filtered)
+        valid = filtered[filtered["price_per_mw_eur_m"].notna()].copy()
+        if valid.empty:
+            st.info("No hay suficientes deals con importe y MW para benchmarking.")
+        else:
+            q1, q3 = valid["price_per_mw_eur_m"].quantile([0.25, 0.75]); iqr = q3-q1
+            valid = valid[(valid["price_per_mw_eur_m"] >= q1-1.5*iqr) & (valid["price_per_mw_eur_m"] <= q3+1.5*iqr)]
+            bench = valid.groupby(["technology", "location_country"])["price_per_mw_eur_m"].agg(deals="count", min="min", p25=lambda x: x.quantile(.25), median="median", p75=lambda x: x.quantile(.75), max="max").reset_index()
+            st.dataframe(bench, use_container_width=True, hide_index=True)
     with tabs[6]:
-        valuation_benchmarking(filtered)
+        c1, c2 = st.columns(2)
+        buyers = filtered["buyer"].replace("", np.nan).dropna().value_counts().head(15).rename_axis("buyer").reset_index(name="deals")
+        sellers = filtered["seller"].replace("", np.nan).dropna().value_counts().head(15).rename_axis("seller").reset_index(name="deals")
+        c1.dataframe(buyers, use_container_width=True, hide_index=True)
+        c2.dataframe(sellers, use_container_width=True, hide_index=True)
+        trend = filtered[filtered["price_per_mw_eur_m"].notna()].groupby(["year", "technology"])["price_per_mw_eur_m"].median().reset_index()
+        if not trend.empty:
+            st.plotly_chart(px.line(trend, x="year", y="price_per_mw_eur_m", color="technology", markers=True, title="Tendencia mediana €/MW"), use_container_width=True)
     with tabs[7]:
-        strategic_insights(filtered)
+        validation_workspace(filtered)
     with tabs[8]:
-        data_quality(filtered)
-    with tabs[9]:
-        st.subheader("Upload & Export")
-        st.write(f"Fuente cargada: **{source_name}**")
-        st.download_button("Descargar dataset filtrado CSV", filtered.to_csv(index=False).encode("utf-8"), "filtered_deals.csv", "text/csv")
-        st.download_button("Descargar dataset filtrado Excel", to_excel_bytes(filtered), "filtered_deals.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        selected = filtered[filtered["deal_id"].astype(str).isin([str(x) for x in st.session_state.get("selected_deal_ids", [])])]
-        st.download_button("Descargar operaciones seleccionadas Excel", to_excel_bytes(selected, "Selected"), "selected_deals.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        md = build_markdown_summary(selected) if not selected.empty else "# Executive Summary\nNo selected deals."
-        st.download_button("Descargar resumen ejecutivo Markdown", md.encode("utf-8"), "executive_summary.md", "text/markdown")
-        st.markdown("##### Plantilla de columnas")
-        st.dataframe(pd.DataFrame({"column": REQUIRED_COLUMNS}), use_container_width=True, hide_index=True)
-
+        export_tab(full_df, filtered)
 
 if __name__ == "__main__":
     main()

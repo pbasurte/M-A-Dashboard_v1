@@ -1,41 +1,45 @@
-# M&A Renewable Deal Tracker – Spain & Spanish Companies Abroad
+# M&A Renewable Deal Tracker v2 – Auto-fed Open Sources
 
-Aplicación en Streamlit para consultar, filtrar, comparar y analizar transacciones de M&A de activos/compañías renovables en España y operaciones internacionales con compañías españolas.
+Esta v2 consulta fuentes abiertas online cada vez que se abre una nueva sesión de la app y extrae candidatos de transacciones M&A renovables para España y compañías españolas en el exterior.
 
-## Instalación
+## Fuentes incluidas
+
+- GDELT 2.0 DOC API: no requiere API key.
+- Scraping ligero de búsquedas públicas de pv magazine España.
+- NewsAPI opcional: requiere `NEWSAPI_KEY` en Streamlit secrets.
+- GNews opcional: requiere `GNEWS_API_KEY` en Streamlit secrets.
+
+## Instalación local
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Archivos incluidos
+## Despliegue en Streamlit Cloud
 
-- `app.py`: aplicación Streamlit completa.
-- `sample_deals.csv`: dataset ficticio de ejemplo. No contiene operaciones reales.
-- `requirements.txt`: dependencias mínimas.
-- `README.md`: instrucciones de uso.
+1. Sube `app.py`, `requirements.txt`, `deals_database.csv` y este `README.md` a GitHub.
+2. En Streamlit Cloud selecciona:
+   - Repository: tu repositorio
+   - Branch: `main`
+   - Main file path: `app.py`
+3. Pulsa Deploy.
 
-## Uso de datos reales
+## Actualización automática
 
-1. Prepara un CSV o Excel con las columnas indicadas en la pestaña **Upload & Export**.
-2. Si faltan columnas, la app las creará vacías para evitar errores.
-3. Sube el archivo desde la barra lateral.
-4. Revisa la pestaña **Data Quality** para identificar importes no divulgados, MW ausentes, fuentes incompletas, posibles duplicados y anomalías de precio/MW.
+La app consulta las fuentes online al iniciar una nueva sesión. Además, incorpora un botón en la barra lateral: `Refrescar fuentes online ahora`.
 
-## Nota importante
+## Importante sobre calidad de datos
 
-El archivo `sample_deals.csv` contiene exclusivamente datos ficticios marcados como `sample data` y `unverified`. Para cualquier análisis profesional, sustituye el dataset por información real verificada desde fuentes públicas, bases privadas o documentación transaccional.
+La app no debe tratar los datos extraídos automáticamente como confirmados. Por defecto, los registros online se marcan como `pending_review`. Revisa la fuente, valida comprador/vendedor/MW/importe y exporta la base depurada.
 
-## Funcionalidades principales
+## API keys opcionales
 
-- Executive dashboard con KPIs financieros y operativos.
-- Screener de deals con selección mediante checkboxes.
-- Vista detallada de cada operación.
-- Comparador de transacciones seleccionadas.
-- Market analytics con gráficos Plotly.
-- Mapa de activos con coordenadas.
-- Valuation benchmarking por tecnología, fase y país, excluyendo outliers.
-- Strategic insights: compradores activos, vendedores recurrentes, liquidez por tecnología, regiones más activas, distressed potencial y tendencias de precio/MW.
-- Data quality checks.
-- Exportación a CSV, Excel y Markdown.
+En Streamlit Cloud, añade secrets:
+
+```toml
+NEWSAPI_KEY = "tu_clave"
+GNEWS_API_KEY = "tu_clave"
+```
+
+Si no añades claves, la app sigue funcionando con GDELT y pv magazine.
