@@ -1,11 +1,19 @@
-# M&A Renewable Deal Tracker v3 – Historical Database + Incremental Updates
+# M&A Renewable Deal Tracker v4 – Master Database + Recent Updates
 
-Esta v3 combina:
+Esta versión corrige el enfoque anterior: la app ya no intenta reconstruir el histórico completo en runtime. La app carga una base maestra histórica (`deals_master_2020_2026.csv`) y, en paralelo, permite buscar candidatos recientes online.
 
-1. Base histórica de candidatos de deals desde 2020 o el año que selecciones.
-2. Actualización incremental de los últimos 90 días cada vez que se abre la app.
-3. Refresco manual tanto del histórico como de las novedades recientes.
-4. Selección de operaciones, comparables, exportación y control de calidad.
+## Archivos
+
+- `app.py`: aplicación Streamlit estable, database-first.
+- `deals_master_2020_2026.csv`: base maestra histórica inicial.
+- `recent_candidates.csv`: candidatos recientes pendientes de revisión.
+- `sources_config.csv`: fuentes utilizadas/sugeridas.
+- `data_dictionary.xlsx`: diccionario de campos.
+- `requirements.txt`: dependencias.
+
+## Importante
+
+La base incluida es un **public seed** construido con datos públicos visibles en fuentes abiertas. No debe considerarse exhaustiva. Para tener absolutamente todas las operaciones 2020-2026, debe enriquecerse con exportaciones licenciadas o bases profesionales como Mergr, TTR, Inframation, IJGlobal, LSEG/Mergermarket o una extracción completa/validada de pv magazine/iDeals.
 
 ## Ejecución
 
@@ -14,27 +22,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Despliegue en Streamlit Cloud
+## GitHub / Streamlit Cloud
 
-Sube estos archivos a GitHub:
+Sube todos los archivos a GitHub y en Streamlit Cloud selecciona `app.py` como main file path.
 
-- app.py
-- requirements.txt
-- deals_database.csv
-- README.md
+## Flujo operativo
 
-En Streamlit Cloud:
-
-- Main file path: `app.py`
-- Branch: `main`
-
-## Funcionamiento
-
-- Al abrir la app, se actualizan automáticamente los últimos 90 días.
-- Para crear la base histórica, pulsa `Construir/actualizar histórico desde fuentes abiertas` en la barra lateral.
-- El histórico se obtiene principalmente de GDELT por ventanas trimestrales desde el año inicial seleccionado.
-- Los candidatos se marcan como `pending_review` porque la extracción es automática y debe validarse.
-
-## Nota importante
-
-Streamlit Cloud no guarda cambios permanentes en el repositorio cuando la app está corriendo. Por eso, para conservar una base histórica validada debes exportar `deals_database_v3.csv` y subirlo de nuevo al repo como `deals_database.csv`, o conectar una base externa en una fase posterior.
+1. La pestaña `Historical Deal Screener` permite seleccionar transacciones históricas.
+2. La pestaña `Recent Candidates` permite revisar candidatos recientes detectados online.
+3. Los candidatos recientes no se incorporan automáticamente a la base maestra: deben revisarse y cargarse en `deals_master_2020_2026.csv`.

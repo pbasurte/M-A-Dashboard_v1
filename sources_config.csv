@@ -1,0 +1,5 @@
+source_name,source_url,source_type,use_case,requires_api_key
+pv magazine España monthly M&A lists,https://www.pv-magazine.es/2026/06/18/listado-de-las-nuevas-ma-renovables-anunciadas-en-mayo-en-espana-2/,public article,historical seed and recent candidates,no
+Mergr renewable energy M&A Spain,https://mergr.com/transaction/renewable-energy/spain,structured web database,historical enrichment / licensed export if available,possible/licensed
+GDELT DOC API,https://api.gdeltproject.org/api/v2/doc/doc,open news API,recent candidate detection,no
+CNMV / corporate press releases,https://www.cnmv.es/,official disclosures,validation of listed Spanish counterparties,no
