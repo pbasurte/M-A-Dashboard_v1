@@ -1,15 +1,13 @@
-# M&A Renewable Deal Tracker v2 – Auto-fed Open Sources
+# M&A Renewable Deal Tracker v3 – Historical Database + Incremental Updates
 
-Esta v2 consulta fuentes abiertas online cada vez que se abre una nueva sesión de la app y extrae candidatos de transacciones M&A renovables para España y compañías españolas en el exterior.
+Esta v3 combina:
 
-## Fuentes incluidas
+1. Base histórica de candidatos de deals desde 2020 o el año que selecciones.
+2. Actualización incremental de los últimos 90 días cada vez que se abre la app.
+3. Refresco manual tanto del histórico como de las novedades recientes.
+4. Selección de operaciones, comparables, exportación y control de calidad.
 
-- GDELT 2.0 DOC API: no requiere API key.
-- Scraping ligero de búsquedas públicas de pv magazine España.
-- NewsAPI opcional: requiere `NEWSAPI_KEY` en Streamlit secrets.
-- GNews opcional: requiere `GNEWS_API_KEY` en Streamlit secrets.
-
-## Instalación local
+## Ejecución
 
 ```bash
 pip install -r requirements.txt
@@ -18,28 +16,25 @@ streamlit run app.py
 
 ## Despliegue en Streamlit Cloud
 
-1. Sube `app.py`, `requirements.txt`, `deals_database.csv` y este `README.md` a GitHub.
-2. En Streamlit Cloud selecciona:
-   - Repository: tu repositorio
-   - Branch: `main`
-   - Main file path: `app.py`
-3. Pulsa Deploy.
+Sube estos archivos a GitHub:
 
-## Actualización automática
+- app.py
+- requirements.txt
+- deals_database.csv
+- README.md
 
-La app consulta las fuentes online al iniciar una nueva sesión. Además, incorpora un botón en la barra lateral: `Refrescar fuentes online ahora`.
+En Streamlit Cloud:
 
-## Importante sobre calidad de datos
+- Main file path: `app.py`
+- Branch: `main`
 
-La app no debe tratar los datos extraídos automáticamente como confirmados. Por defecto, los registros online se marcan como `pending_review`. Revisa la fuente, valida comprador/vendedor/MW/importe y exporta la base depurada.
+## Funcionamiento
 
-## API keys opcionales
+- Al abrir la app, se actualizan automáticamente los últimos 90 días.
+- Para crear la base histórica, pulsa `Construir/actualizar histórico desde fuentes abiertas` en la barra lateral.
+- El histórico se obtiene principalmente de GDELT por ventanas trimestrales desde el año inicial seleccionado.
+- Los candidatos se marcan como `pending_review` porque la extracción es automática y debe validarse.
 
-En Streamlit Cloud, añade secrets:
+## Nota importante
 
-```toml
-NEWSAPI_KEY = "tu_clave"
-GNEWS_API_KEY = "tu_clave"
-```
-
-Si no añades claves, la app sigue funcionando con GDELT y pv magazine.
+Streamlit Cloud no guarda cambios permanentes en el repositorio cuando la app está corriendo. Por eso, para conservar una base histórica validada debes exportar `deals_database_v3.csv` y subirlo de nuevo al repo como `deals_database.csv`, o conectar una base externa en una fase posterior.
