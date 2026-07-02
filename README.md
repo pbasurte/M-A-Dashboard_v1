@@ -1,33 +1,24 @@
-# M&A Renewable Deal Tracker v4 – Master Database + Recent Updates
+# M&A Renewable Deal Tracker v5 – Deal Selection Focus
 
-Esta versión corrige el enfoque anterior: la app ya no intenta reconstruir el histórico completo en runtime. La app carga una base maestra histórica (`deals_master_2020_2026.csv`) y, en paralelo, permite buscar candidatos recientes online.
+Cambios:
 
-## Archivos
+1. Eliminados los gráficos irrelevantes.
+2. Corregido `StreamlitDuplicateElementId` con claves únicas y evitando reutilizar elementos repetidos.
+3. La barra lateral tiene un único filtro: `Deal`.
+4. El desplegable de `Deal` muestra todos los deals e indica si cada uno tiene importe `disclosed` o `undisclosed`.
+5. Candidatos recientes separados de la base maestra.
 
-- `app.py`: aplicación Streamlit estable, database-first.
-- `deals_master_2020_2026.csv`: base maestra histórica inicial.
-- `recent_candidates.csv`: candidatos recientes pendientes de revisión.
-- `sources_config.csv`: fuentes utilizadas/sugeridas.
-- `data_dictionary.xlsx`: diccionario de campos.
-- `requirements.txt`: dependencias.
+## Uso
 
-## Importante
+Sube este `app.py` al repo junto a:
 
-La base incluida es un **public seed** construido con datos públicos visibles en fuentes abiertas. No debe considerarse exhaustiva. Para tener absolutamente todas las operaciones 2020-2026, debe enriquecerse con exportaciones licenciadas o bases profesionales como Mergr, TTR, Inframation, IJGlobal, LSEG/Mergermarket o una extracción completa/validada de pv magazine/iDeals.
+- `deals_master_2020_2026.csv`
+- `recent_candidates.csv`
+- `requirements.txt`
 
-## Ejecución
+Ejecuta:
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## GitHub / Streamlit Cloud
-
-Sube todos los archivos a GitHub y en Streamlit Cloud selecciona `app.py` como main file path.
-
-## Flujo operativo
-
-1. La pestaña `Historical Deal Screener` permite seleccionar transacciones históricas.
-2. La pestaña `Recent Candidates` permite revisar candidatos recientes detectados online.
-3. Los candidatos recientes no se incorporan automáticamente a la base maestra: deben revisarse y cargarse en `deals_master_2020_2026.csv`.
